@@ -1,4 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import type { Session } from '@supabase/supabase-js'
+import { isConfigured, supabase, type Goal, type GoalStatus } from './supabase'
+import { dayKey, useWeekGoals } from './goals'
+import Login from './Login'
 
 type Tab = 'week' | 'history'
 
@@ -111,6 +115,101 @@ function ClockIcon() {
   )
 }
 
+function CheckIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5 12.5l4.5 4.5L19 7.5" />
+    </svg>
+  )
+}
+
+function CrossIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+      strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M7 7l10 10M17 7L7 17" />
+    </svg>
+  )
+}
+
+// ---- Goals ----
+
+function GoalRow({
+  goal,
+  onStatus,
+}: {
+  goal: Goal
+  onStatus: (goal: Goal, status: GoalStatus) => void
+}) {
+  // Tapping the active mark again sets the goal back to open.
+  const toggle = (status: GoalStatus) => onStatus(goal, goal.status === status ? 'open' : status)
+  return (
+    <div className={`goal is-${goal.status}`}>
+      <span className="goal-title">{goal.title}</span>
+      <button
+        type="button"
+        className="mark mark-done"
+        aria-label={`Mark "${goal.title}" done`}
+        aria-pressed={goal.status === 'done'}
+        onClick={() => toggle('done')}
+      >
+        <CheckIcon />
+      </button>
+      <button
+        type="button"
+        className="mark mark-failed"
+        aria-label={`Mark "${goal.title}" failed`}
+        aria-pressed={goal.status === 'failed'}
+        onClick={() => toggle('failed')}
+      >
+        <CrossIcon />
+      </button>
+    </div>
+  )
+}
+
+function AddGoal({ label, onAdd }: { label: string; onAdd: (title: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const [title, setTitle] = useState('')
+
+  if (!open) {
+    return (
+      <button type="button" className="add" onClick={() => setOpen(true)}>
+        + Add goal
+      </button>
+    )
+  }
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault()
+    const text = title.trim()
+    if (text) onAdd(text)
+    setTitle('') // stay open so several goals can be added in a row
+  }
+
+  return (
+    <form className="add-form" onSubmit={submit}>
+      <input
+        className="field"
+        aria-label={`New goal for ${label}`}
+        placeholder="New goal"
+        autoFocus
+        maxLength={200}
+        enterKeyHint="done"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        onBlur={() => {
+          const text = title.trim()
+          if (text) onAdd(text)
+          setTitle('')
+          setOpen(false)
+        }}
+      />
+    </form>
+  )
+}
+
 // ---- Screens ----
 
 function WeekView() {
@@ -122,6 +221,13 @@ function WeekView() {
     () => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)),
     [weekStart],
   )
+  const { goals, loading, error, addGoal, setStatus } = useWeekGoals(weekStart)
+  const doneCount = goals.filter((g) => g.status === 'done').length
+  const summary = loading
+    ? 'Loading…'
+    : goals.length === 0
+      ? 'No goals yet'
+      : `${doneCount} of ${goals.length} done`
 
   const jumpTo = (index: number) => {
     dayRefs.current[index]?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -132,7 +238,7 @@ function WeekView() {
       <header className="header">
         <div>
           <h1>{weekLabel(weekStart)}</h1>
-          <p className="sub">No goals yet</p>
+          <p className="sub">{summary}</p>
         </div>
         <div className="nav">
           <button
@@ -173,9 +279,17 @@ function WeekView() {
         })}
       </nav>
 
+      {error && (
+        <p className="banner" role="alert">
+          {error}
+        </p>
+      )}
+
       <main className="agenda">
         {days.map((d, i) => {
           const isToday = isSameDay(d, today)
+          const key = dayKey(d)
+          const dayGoals = goals.filter((g) => g.day === key)
           return (
             <section
               key={d.toISOString()}
@@ -190,7 +304,12 @@ function WeekView() {
                 <p className="day-num">{d.getDate()}</p>
               </div>
               <div className="day-goals">
-                <p className="empty">Nothing planned</p>
+                {dayGoals.map((g) => (
+                  <GoalRow key={g.id} goal={g} onStatus={setStatus} />
+                ))}
+                {!loading && (
+                  <AddGoal label={weekdayLong.format(d)} onAdd={(title) => addGoal(key, title)} />
+                )}
               </div>
             </section>
           )
@@ -200,7 +319,7 @@ function WeekView() {
   )
 }
 
-function HistoryView() {
+function HistoryView({ email }: { email: string | undefined }) {
   return (
     <>
       <header className="header">
@@ -209,6 +328,12 @@ function HistoryView() {
           <p className="sub">Your history will show up here</p>
         </div>
       </header>
+      <div className="account">
+        <span className="sub">Signed in as {email}</span>
+        <button type="button" className="link" onClick={() => supabase.auth.signOut()}>
+          Sign out
+        </button>
+      </div>
       <main className="agenda">
         <p className="empty">Nothing to show yet.</p>
       </main>
@@ -243,10 +368,42 @@ function TabBar({ tab, onChange }: { tab: Tab; onChange: (tab: Tab) => void }) {
 
 export default function App() {
   const [tab, setTab] = useState<Tab>('week')
+  const [session, setSession] = useState<Session | null>(null)
+  const [checking, setChecking] = useState(isConfigured)
+
+  useEffect(() => {
+    if (!isConfigured) return
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session)
+      setChecking(false)
+    })
+    const { data } = supabase.auth.onAuthStateChange((_event, s) => setSession(s))
+    return () => data.subscription.unsubscribe()
+  }, [])
+
+  if (!isConfigured) {
+    return (
+      <div className="app">
+        <main className="login">
+          <h1>Weekly Goals</h1>
+          <p className="error">
+            Supabase isn't set up yet. Add VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY
+            (see README).
+          </p>
+        </main>
+      </div>
+    )
+  }
+  if (checking) return <div className="app" />
+  if (!session) return <Login />
 
   return (
     <div className="app">
-      {tab === 'week' ? <WeekView /> : <HistoryView />}
+      {tab === 'week' ? (
+        <WeekView key={session.user.id} />
+      ) : (
+        <HistoryView email={session.user.email} />
+      )}
       <TabBar tab={tab} onChange={setTab} />
     </div>
   )
